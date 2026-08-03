@@ -9,6 +9,28 @@ struct AppEntry: Identifiable {
     var containerPath: String { dataPath.isEmpty ? bundlePath : dataPath }
 }
 
+private struct AppRow: View {
+    let app: AppEntry
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(app.name).font(.body)
+                Text(app.id).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark").foregroundStyle(.accentColor)
+            }
+        }
+        .contentShape(Rectangle())
+        .listRowBackground(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+        .onTapGesture(perform: onTap)
+    }
+}
+
 struct ContentView: View {
     @State private var apps:       [AppEntry] = []
     @State private var selectedId: String?    = nil
@@ -55,26 +77,11 @@ struct ContentView: View {
 
             // ── App list ───────────────────────────────────────────
             List(filtered) { app in
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(app.name).font(.body)
-                        Text(app.id).font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if selectedId == app.id {
-                        Image(systemName: "checkmark")
-                            .foregroundStyle(.accentColor)
-                    }
-                }
-                .contentShape(Rectangle())
-                .listRowBackground(
-                    selectedId == app.id
-                        ? Color.accentColor.opacity(0.12)
-                        : Color.clear
+                AppRow(
+                    app: app,
+                    isSelected: selectedId == app.id,
+                    onTap: { selectedId = (selectedId == app.id) ? nil : app.id }
                 )
-                .onTapGesture {
-                    selectedId = (selectedId == app.id) ? nil : app.id
-                }
             }
             .listStyle(.plain)
 
@@ -176,7 +183,7 @@ struct ContentView: View {
         Task.detached {
             let raw  = dd_installed_apps()
             var list = [AppEntry]()
-            for item in raw {
+            for item in (raw ?? []) {
                 guard let d   = item as? [String: Any],
                       let bid = d["bundleId"] as? String, !bid.isEmpty else { continue }
                 list.append(AppEntry(
