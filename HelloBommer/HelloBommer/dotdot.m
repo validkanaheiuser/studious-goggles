@@ -136,8 +136,45 @@ int dd_fuzz_read(const char *identifier, char *outBuf, size_t bufSize,
     return -1;
 }
 
+// ── Shared helper: build AppEntry dicts from an LSApplicationProxy array ──────
+static NSMutableArray *_proxies_to_dicts(NSArray *proxies) {
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:proxies.count];
+    for (id proxy in proxies) {
+        NSString *bundleId = [proxy respondsToSelector:@selector(applicationIdentifier)]
+                             ? [proxy performSelector:@selector(applicationIdentifier)] : nil;
+        if (!bundleId) continue;
+        NSString *name   = [proxy respondsToSelector:@selector(localizedName)]
+                           ? [proxy performSelector:@selector(localizedName)] : nil;
+        NSURL *dataURL   = [proxy respondsToSelector:@selector(dataContainerURL)]
+                           ? [proxy performSelector:@selector(dataContainerURL)] : nil;
+        NSURL *bundleURL = [proxy respondsToSelector:@selector(bundleURL)]
+                           ? [proxy performSelector:@selector(bundleURL)] : nil;
+        [result addObject:@{
+            @"name":       name          ?: bundleId,
+            @"bundleId":   bundleId,
+            @"dataPath":   dataURL.path  ?: @"",
+            @"bundlePath": bundleURL.path ?: @""
+        }];
+    }
+    return result;
+}
+
+// ── Debug info ────────────────────────────────────────────────────────────────
 NSString *dd_debug_info(void) {
     NSMutableString *s = [NSMutableString string];
+
+    // Check SpringBoardServices path
+    void *sbsHandle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+    [s appendFormat:@"SBS dlopen: %@\n", sbsHandle ? @"ok" : @"FAIL"];
+
+    CFArrayRef (*SBSCopyIds)(BOOL) = sbsHandle
+        ? dlsym(sbsHandle, "SBSCopyApplicationDisplayIdentifiers") : NULL;
+    [s appendFormat:@"SBSCopyApplicationDisplayIdentifiers: %@\n", SBSCopyIds ? @"found" : @"not found"];
+    if (SBSCopyIds) {
+        CFArrayRef ids = SBSCopyIds(NO);
+        [s appendFormat:@"SBS all ids count: %ld\n", ids ? CFArrayGetCount(ids) : -1];
+        if (ids) CFRelease(ids);
+    }
 
     Class WSClass = NSClassFromString(@"LSApplicationWorkspace");
     [s appendFormat:@"LSApplicationWorkspace: %@\n", WSClass ? @"found" : @"NOT FOUND"];
@@ -147,57 +184,79 @@ NSString *dd_debug_info(void) {
     [s appendFormat:@"defaultWorkspace: %@\n", ws ? @"ok" : @"nil"];
     if (!ws) return [s copy];
 
-    NSArray *proxies = [ws performSelector:@selector(allApplications)];
-    [s appendFormat:@"allApplications count: %lu\n", (unsigned long)(proxies ? proxies.count : 0)];
-    if (!proxies || proxies.count == 0) return [s copy];
-
-    id first = proxies.firstObject;
-    [s appendFormat:@"proxy class: %@\n", NSStringFromClass([first class])];
-    [s appendFormat:@"has localizedName: %@\n",
-        [first respondsToSelector:@selector(localizedName)] ? @"yes" : @"no"];
-    [s appendFormat:@"has applicationIdentifier: %@\n",
-        [first respondsToSelector:@selector(applicationIdentifier)] ? @"yes" : @"no"];
-    [s appendFormat:@"has dataContainerURL: %@\n",
-        [first respondsToSelector:@selector(dataContainerURL)] ? @"yes" : @"no"];
-
-    if ([first respondsToSelector:@selector(applicationIdentifier)])
-        [s appendFormat:@"first id: %@\n", [first performSelector:@selector(applicationIdentifier)]];
-    if ([first respondsToSelector:@selector(localizedName)])
-        [s appendFormat:@"first name: %@\n", [first performSelector:@selector(localizedName)]];
+    // Probe selectors
+    NSArray *selectors = @[
+        @"allApplications", @"allInstalledApplications",
+        @"privateApplications", @"userInstalledApplications",
+        @"applicationsWithBundleIdentifiers:"
+    ];
+    for (NSString *selName in selectors) {
+        SEL sel = NSSelectorFromString(selName);
+        BOOL responds = [ws respondsToSelector:sel];
+        [s appendFormat:@"%@: %@", selName, responds ? @"yes" : @"no"];
+        if (responds && ![selName hasSuffix:@":"]) {
+            @try {
+                NSArray *arr = [ws performSelector:sel];
+                [s appendFormat:@" (%lu)", (unsigned long)(arr ? arr.count : 0)];
+            } @catch (NSException *e) {
+                [s appendFormat:@" (threw: %@)", e.reason];
+            }
+        }
+        [s appendString:@"\n"];
+    }
 
     return [s copy];
 }
 
-// Returns installed apps via LSApplicationWorkspace (private API).
+// ── Installed apps ────────────────────────────────────────────────────────────
 NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
-    Class WSClass = NSClassFromString(@"LSApplicationWorkspace");
-    if (!WSClass) return @[];
-
-    id workspace = [WSClass performSelector:@selector(defaultWorkspace)];
-    NSArray *proxies = [workspace performSelector:@selector(allApplications)];
-    if (!proxies) return @[];
-
-    NSMutableArray *result = [NSMutableArray arrayWithCapacity:proxies.count];
-    for (id proxy in proxies) {
-        NSString *name     = [proxy respondsToSelector:@selector(localizedName)]
-                             ? [proxy performSelector:@selector(localizedName)] : nil;
-        NSString *bundleId = [proxy respondsToSelector:@selector(applicationIdentifier)]
-                             ? [proxy performSelector:@selector(applicationIdentifier)] : nil;
-        NSURL *dataURL     = [proxy respondsToSelector:@selector(dataContainerURL)]
-                             ? [proxy performSelector:@selector(dataContainerURL)] : nil;
-        NSURL *bundleURL   = [proxy respondsToSelector:@selector(bundleURL)]
-                             ? [proxy performSelector:@selector(bundleURL)] : nil;
-
-        if (!bundleId) continue;
-        [result addObject:@{
-            @"name":       name       ?: bundleId,
-            @"bundleId":   bundleId,
-            @"dataPath":   dataURL.path   ?: @"",
-            @"bundlePath": bundleURL.path ?: @""
-        }];
+    // Strategy 1: SpringBoardServices — works even when LSW is filtered
+    void *sbsHandle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+    if (sbsHandle) {
+        CFArrayRef (*SBSCopyIds)(BOOL) = dlsym(sbsHandle, "SBSCopyApplicationDisplayIdentifiers");
+        if (SBSCopyIds) {
+            CFArrayRef cfIds = SBSCopyIds(NO); // NO = all apps, not just user
+            if (cfIds && CFArrayGetCount(cfIds) > 0) {
+                NSArray *ids = (__bridge_transfer NSArray *)cfIds;
+                Class LAP = NSClassFromString(@"LSApplicationProxy");
+                SEL proxyForId = NSSelectorFromString(@"applicationProxyForIdentifier:");
+                NSMutableArray *proxies = [NSMutableArray arrayWithCapacity:ids.count];
+                if (LAP && [LAP respondsToSelector:proxyForId]) {
+                    for (NSString *bid in ids) {
+                        id proxy = [LAP performSelector:proxyForId withObject:bid];
+                        if (proxy) [proxies addObject:proxy];
+                    }
+                }
+                if (proxies.count > 0) {
+                    NSMutableArray *result = _proxies_to_dicts(proxies);
+                    return [result sortedArrayUsingDescriptors:
+                            @[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
+                                                             selector:@selector(localizedCaseInsensitiveCompare:)]]];
+                }
+            } else if (cfIds) {
+                CFRelease(cfIds);
+            }
+        }
     }
 
-    return [result sortedArrayUsingDescriptors:
-            @[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
-                                             selector:@selector(localizedCaseInsensitiveCompare:)]]];
+    // Strategy 2: LSApplicationWorkspace selectors, broadest first
+    Class WSClass = NSClassFromString(@"LSApplicationWorkspace");
+    if (!WSClass) return @[];
+    id workspace = [WSClass performSelector:@selector(defaultWorkspace)];
+    if (!workspace) return @[];
+
+    NSArray *selNames = @[@"allInstalledApplications", @"allApplications", @"privateApplications"];
+    for (NSString *selName in selNames) {
+        SEL sel = NSSelectorFromString(selName);
+        if (![workspace respondsToSelector:sel]) continue;
+        NSArray *proxies = [workspace performSelector:sel];
+        if (!proxies || proxies.count == 0) continue;
+        NSMutableArray *result = _proxies_to_dicts(proxies);
+        if (result.count == 0) continue;
+        return [result sortedArrayUsingDescriptors:
+                @[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
+                                                 selector:@selector(localizedCaseInsensitiveCompare:)]]];
+    }
+
+    return @[];
 }
