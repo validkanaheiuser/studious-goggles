@@ -1,0 +1,48 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build archive
+        run: |
+          xcodebuild archive \
+            -project HelloBommer/HelloBommer.xcodeproj \
+            -scheme HelloBommer \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/HelloBommer.xcarchive" \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Fake-sign with ldid
+        run: |
+          APP="$RUNNER_TEMP/HelloBommer.xcarchive/Products/Applications/HelloBommer.app"
+          ldid -S "$APP/HelloBommer"
+
+      - name: Package IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -r "$RUNNER_TEMP/HelloBommer.xcarchive/Products/Applications/HelloBommer.app" \
+            "$RUNNER_TEMP/Payload/HelloBommer.app"
+          cd "$RUNNER_TEMP"
+          zip -r HelloBommer.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HelloBommer
+          path: ${{ runner.temp }}/HelloBommer.ipa
+          retention-days: 90
