@@ -136,73 +136,139 @@ int dd_fuzz_read(const char *identifier, char *outBuf, size_t bufSize,
     return -1;
 }
 
-// ── Shared helper: build AppEntry dicts from an LSApplicationProxy array ──────
-static NSMutableArray *_proxies_to_dicts(NSArray *proxies) {
-    NSMutableArray *result = [NSMutableArray arrayWithCapacity:proxies.count];
-    for (id proxy in proxies) {
-        NSString *bundleId = [proxy respondsToSelector:@selector(applicationIdentifier)]
-                             ? [proxy performSelector:@selector(applicationIdentifier)] : nil;
-        if (!bundleId) continue;
-        NSString *name   = [proxy respondsToSelector:@selector(localizedName)]
-                           ? [proxy performSelector:@selector(localizedName)] : nil;
-        NSURL *dataURL   = [proxy respondsToSelector:@selector(dataContainerURL)]
-                           ? [proxy performSelector:@selector(dataContainerURL)] : nil;
-        NSURL *bundleURL = [proxy respondsToSelector:@selector(bundleURL)]
-                           ? [proxy performSelector:@selector(bundleURL)] : nil;
-        [result addObject:@{
-            @"name":       name          ?: bundleId,
-            @"bundleId":   bundleId,
-            @"dataPath":   dataURL.path  ?: @"",
-            @"bundlePath": bundleURL.path ?: @""
-        }];
+// ── Container metadata plist key ─────────────────────────────────────────────
+#define kMCMMetaId @"MCMMetadataIdentifier"
+
+// ── Scan a container directory, return {bundleId -> path} ────────────────────
+static void _scan_containers(NSString *base,
+                             BOOL isBundleContainer,
+                             NSMutableDictionary *idToPath,
+                             NSMutableDictionary *idToName) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray *uuids = [fm contentsOfDirectoryAtPath:base error:nil];
+    if (!uuids) return;
+    for (NSString *uuid in uuids) {
+        NSString *dir  = [base stringByAppendingPathComponent:uuid];
+        NSString *meta = [dir stringByAppendingPathComponent:
+                          @".com.apple.mobile_container_manager.metadata.plist"];
+        NSDictionary *m = [NSDictionary dictionaryWithContentsOfFile:meta];
+        NSString *bid   = m[kMCMMetaId];
+        if (!bid || bid.length == 0) continue;
+
+        if (!isBundleContainer) {
+            // Data container: the dir itself is the container root
+            if (!idToPath[bid]) idToPath[bid] = dir;
+        } else {
+            // Bundle container: find the .app inside, read Info.plist for name
+            NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
+            for (NSString *item in items) {
+                if (![item hasSuffix:@".app"]) continue;
+                NSString *appDir   = [dir stringByAppendingPathComponent:item];
+                NSString *infoPlist = [appDir stringByAppendingPathComponent:@"Info.plist"];
+                NSDictionary *info  = [NSDictionary dictionaryWithContentsOfFile:infoPlist];
+                if (!idToPath[bid]) idToPath[bid] = appDir;
+                if (!idToName[bid]) {
+                    NSString *n = info[@"CFBundleDisplayName"] ?: info[@"CFBundleName"];
+                    if (n) idToName[bid] = n;
+                }
+                break;
+            }
+        }
     }
-    return result;
+}
+
+// ── Enrich name/paths from LSApplicationProxy ─────────────────────────────────
+static void _enrich_from_lap(NSArray *ids,
+                              NSMutableDictionary *idToDataPath,
+                              NSMutableDictionary *idToBundlePath,
+                              NSMutableDictionary *idToName) {
+    Class LAP = NSClassFromString(@"LSApplicationProxy");
+    SEL proxyForId = NSSelectorFromString(@"applicationProxyForIdentifier:");
+    if (!LAP || ![LAP respondsToSelector:proxyForId]) return;
+
+    for (NSString *bid in ids) {
+        id proxy = [LAP performSelector:proxyForId withObject:bid];
+        if (!proxy) continue;
+
+        if (!idToDataPath[bid]) {
+            NSURL *u = [proxy respondsToSelector:@selector(dataContainerURL)]
+                       ? [proxy performSelector:@selector(dataContainerURL)] : nil;
+            if (u.path) idToDataPath[bid] = u.path;
+        }
+        if (!idToBundlePath[bid]) {
+            NSURL *u = [proxy respondsToSelector:@selector(bundleURL)]
+                       ? [proxy performSelector:@selector(bundleURL)] : nil;
+            if (u.path) idToBundlePath[bid] = u.path;
+        }
+        if (!idToName[bid]) {
+            NSString *n = [proxy respondsToSelector:@selector(localizedName)]
+                          ? [proxy performSelector:@selector(localizedName)] : nil;
+            if (n) idToName[bid] = n;
+        }
+    }
 }
 
 // ── Debug info ────────────────────────────────────────────────────────────────
 NSString *dd_debug_info(void) {
     NSMutableString *s = [NSMutableString string];
+    NSFileManager *fm = [NSFileManager defaultManager];
 
-    // Check SpringBoardServices path
-    void *sbsHandle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
-    [s appendFormat:@"SBS dlopen: %@\n", sbsHandle ? @"ok" : @"FAIL"];
-
-    CFArrayRef (*SBSCopyIds)(BOOL) = sbsHandle
-        ? dlsym(sbsHandle, "SBSCopyApplicationDisplayIdentifiers") : NULL;
-    [s appendFormat:@"SBSCopyApplicationDisplayIdentifiers: %@\n", SBSCopyIds ? @"found" : @"not found"];
+    // SBS
+    void *sbsH = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+    CFArrayRef (*SBSCopyIds)(BOOL) = sbsH ? dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers") : NULL;
+    NSArray *sbsIds = nil;
     if (SBSCopyIds) {
-        CFArrayRef ids = SBSCopyIds(NO);
-        [s appendFormat:@"SBS all ids count: %ld\n", ids ? CFArrayGetCount(ids) : -1];
-        if (ids) CFRelease(ids);
+        CFArrayRef cf = SBSCopyIds(NO);
+        if (cf) sbsIds = (__bridge_transfer NSArray *)cf;
+    }
+    [s appendFormat:@"SBS ids: %lu\n", (unsigned long)(sbsIds.count)];
+
+    // LAP
+    Class LAP = NSClassFromString(@"LSApplicationProxy");
+    SEL proxyForId = NSSelectorFromString(@"applicationProxyForIdentifier:");
+    BOOL canProxy = LAP && [LAP respondsToSelector:proxyForId];
+    [s appendFormat:@"LAP: %@\n", canProxy ? @"ok" : @"no"];
+    if (canProxy && sbsIds.count > 0) {
+        id proxy = [LAP performSelector:proxyForId withObject:sbsIds.firstObject];
+        NSURL *du = proxy ? ([proxy respondsToSelector:@selector(dataContainerURL)]
+                             ? [proxy performSelector:@selector(dataContainerURL)] : nil) : nil;
+        [s appendFormat:@"LAP dataContainerURL: %@\n", du.path ?: @"nil"];
     }
 
-    Class WSClass = NSClassFromString(@"LSApplicationWorkspace");
-    [s appendFormat:@"LSApplicationWorkspace: %@\n", WSClass ? @"found" : @"NOT FOUND"];
-    if (!WSClass) return [s copy];
-
-    id ws = [WSClass performSelector:@selector(defaultWorkspace)];
-    [s appendFormat:@"defaultWorkspace: %@\n", ws ? @"ok" : @"nil"];
-    if (!ws) return [s copy];
-
-    // Probe selectors
-    NSArray *selectors = @[
-        @"allApplications", @"allInstalledApplications",
-        @"privateApplications", @"userInstalledApplications",
-        @"applicationsWithBundleIdentifiers:"
+    // Data container scan
+    NSArray *dataBases = @[
+        @"/var/mobile/Containers/Data/Application",
+        @"/private/var/mobile/Containers/Data/Application"
     ];
-    for (NSString *selName in selectors) {
-        SEL sel = NSSelectorFromString(selName);
-        BOOL responds = [ws respondsToSelector:sel];
-        [s appendFormat:@"%@: %@", selName, responds ? @"yes" : @"no"];
-        if (responds && ![selName hasSuffix:@":"]) {
-            @try {
-                NSArray *arr = [ws performSelector:sel];
-                [s appendFormat:@" (%lu)", (unsigned long)(arr ? arr.count : 0)];
-            } @catch (NSException *e) {
-                [s appendFormat:@" (threw: %@)", e.reason];
-            }
-        }
-        [s appendString:@"\n"];
+    for (NSString *base in dataBases) {
+        NSArray *uuids = [fm contentsOfDirectoryAtPath:base error:nil];
+        [s appendFormat:@"Data scan %@: %lu\n", base, (unsigned long)(uuids.count)];
+        if (uuids.count > 0) break;
+    }
+
+    // Bundle container scan
+    NSArray *bundleBases = @[
+        @"/var/containers/Bundle/Application",
+        @"/private/var/containers/Bundle/Application"
+    ];
+    for (NSString *base in bundleBases) {
+        NSArray *uuids = [fm contentsOfDirectoryAtPath:base error:nil];
+        [s appendFormat:@"Bundle scan %@: %lu\n", base, (unsigned long)(uuids.count)];
+        if (uuids.count > 0) break;
+    }
+
+    // Total from dd_installed_apps
+    NSArray *apps = dd_installed_apps();
+    NSUInteger withPath = 0;
+    for (NSDictionary *a in apps) {
+        if ([a[@"dataPath"] length] > 0) withPath++;
+    }
+    [s appendFormat:@"installed_apps total: %lu (with path: %lu)\n",
+        (unsigned long)apps.count, (unsigned long)withPath];
+    if (apps.count > 0) {
+        NSDictionary *first = apps.firstObject;
+        [s appendFormat:@"first: %@ | %@ | %@",
+            first[@"name"], first[@"bundleId"], first[@"dataPath"]];
     }
 
     return [s copy];
@@ -210,71 +276,80 @@ NSString *dd_debug_info(void) {
 
 // ── Installed apps ────────────────────────────────────────────────────────────
 NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
-    // Get bundle IDs via SpringBoardServices (works even in sandbox)
-    void *sbsHandle = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
-    CFArrayRef (*SBSCopyIds)(BOOL) = sbsHandle
-        ? dlsym(sbsHandle, "SBSCopyApplicationDisplayIdentifiers") : NULL;
+    NSMutableOrderedSet *allIds  = [NSMutableOrderedSet orderedSet];
+    NSMutableDictionary *dataMap   = [NSMutableDictionary dictionary]; // bid -> dataPath
+    NSMutableDictionary *bundleMap = [NSMutableDictionary dictionary]; // bid -> bundlePath
+    NSMutableDictionary *nameMap   = [NSMutableDictionary dictionary]; // bid -> name
 
-    NSArray *ids = nil;
+    // ── Source 1: SBS bundle IDs ──────────────────────────────────────────────
+    void *sbsH = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+    CFArrayRef (*SBSCopyIds)(BOOL) = sbsH
+        ? dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers") : NULL;
     if (SBSCopyIds) {
         CFArrayRef cf = SBSCopyIds(NO);
         if (cf) {
-            ids = (__bridge_transfer NSArray *)cf;
+            NSArray *ids = (__bridge_transfer NSArray *)cf;
+            for (NSString *bid in ids)
+                if (bid.length) [allIds addObject:bid];
         }
     }
 
-    // Fallback: LSApplicationWorkspace selectors
-    if (!ids || ids.count == 0) {
+    // ── Source 2: Data container filesystem scan ──────────────────────────────
+    NSArray *dataBases = @[
+        @"/var/mobile/Containers/Data/Application",
+        @"/private/var/mobile/Containers/Data/Application"
+    ];
+    for (NSString *base in dataBases) {
+        _scan_containers(base, NO, dataMap, nameMap);
+        if (dataMap.count > 0) {
+            for (NSString *bid in dataMap) [allIds addObject:bid];
+            break;
+        }
+    }
+
+    // ── Source 3: Bundle container filesystem scan ────────────────────────────
+    NSArray *bundleBases = @[
+        @"/var/containers/Bundle/Application",
+        @"/private/var/containers/Bundle/Application"
+    ];
+    for (NSString *base in bundleBases) {
+        _scan_containers(base, YES, bundleMap, nameMap);
+        if (bundleMap.count > 0) {
+            for (NSString *bid in bundleMap) [allIds addObject:bid];
+            break;
+        }
+    }
+
+    // ── Source 4: LSApplicationProxy enrichment ───────────────────────────────
+    _enrich_from_lap(allIds.array, dataMap, bundleMap, nameMap);
+
+    // ── Source 5: LSApplicationWorkspace selectors (last resort) ─────────────
+    if (allIds.count == 0) {
         Class WSClass = NSClassFromString(@"LSApplicationWorkspace");
         id ws = WSClass ? [WSClass performSelector:@selector(defaultWorkspace)] : nil;
-        if (ws) {
-            for (NSString *selName in @[@"allInstalledApplications", @"allApplications"]) {
-                SEL sel = NSSelectorFromString(selName);
-                if (![ws respondsToSelector:sel]) continue;
-                NSArray *proxies = [ws performSelector:sel];
-                if (!proxies || proxies.count == 0) continue;
-                NSMutableArray *result = _proxies_to_dicts(proxies);
-                if (result.count > 0)
-                    return [result sortedArrayUsingDescriptors:
-                            @[[NSSortDescriptor sortDescriptorWithKey:@"name" ascending:YES
-                                                             selector:@selector(localizedCaseInsensitiveCompare:)]]];
+        for (NSString *selName in @[@"allInstalledApplications", @"allApplications"]) {
+            SEL sel = NSSelectorFromString(selName);
+            if (!ws || ![ws respondsToSelector:sel]) continue;
+            NSArray *proxies = [ws performSelector:sel];
+            for (id proxy in proxies) {
+                NSString *bid = [proxy respondsToSelector:@selector(applicationIdentifier)]
+                                ? [proxy performSelector:@selector(applicationIdentifier)] : nil;
+                if (!bid.length) continue;
+                [allIds addObject:bid];
             }
+            _enrich_from_lap(allIds.array, dataMap, bundleMap, nameMap);
+            if (allIds.count > 0) break;
         }
-        return @[];
     }
 
-    // Enrich each ID with name/paths via LSApplicationProxy (optional)
-    Class LAP = NSClassFromString(@"LSApplicationProxy");
-    SEL proxyForId = NSSelectorFromString(@"applicationProxyForIdentifier:");
-    BOOL canProxy = LAP && [LAP respondsToSelector:proxyForId];
-
-    NSMutableArray *result = [NSMutableArray arrayWithCapacity:ids.count];
-    for (NSString *bid in ids) {
-        if (!bid || bid.length == 0) continue;
-        NSString *name       = bid;
-        NSString *dataPath   = @"";
-        NSString *bundlePath = @"";
-
-        if (canProxy) {
-            id proxy = [LAP performSelector:proxyForId withObject:bid];
-            if (proxy) {
-                NSString *n = [proxy respondsToSelector:@selector(localizedName)]
-                              ? [proxy performSelector:@selector(localizedName)] : nil;
-                if (n) name = n;
-                NSURL *du = [proxy respondsToSelector:@selector(dataContainerURL)]
-                            ? [proxy performSelector:@selector(dataContainerURL)] : nil;
-                if (du.path) dataPath = du.path;
-                NSURL *bu = [proxy respondsToSelector:@selector(bundleURL)]
-                            ? [proxy performSelector:@selector(bundleURL)] : nil;
-                if (bu.path) bundlePath = bu.path;
-            }
-        }
-
+    // ── Assemble result ───────────────────────────────────────────────────────
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:allIds.count];
+    for (NSString *bid in allIds) {
         [result addObject:@{
-            @"name":       name,
+            @"name":       nameMap[bid]   ?: bid,
             @"bundleId":   bid,
-            @"dataPath":   dataPath,
-            @"bundlePath": bundlePath
+            @"dataPath":   dataMap[bid]   ?: @"",
+            @"bundlePath": bundleMap[bid] ?: @""
         }];
     }
 
