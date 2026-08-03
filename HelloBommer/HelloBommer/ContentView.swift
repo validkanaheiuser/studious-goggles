@@ -22,7 +22,7 @@ private struct AppRow: View {
             }
             Spacer()
             if isSelected {
-                Image(systemName: "checkmark").foregroundStyle(.accentColor)
+                Image(systemName: "checkmark").foregroundStyle(Color.accentColor)
             }
         }
         .contentShape(Rectangle())
@@ -184,13 +184,12 @@ struct ContentView: View {
             let raw  = dd_installed_apps()
             var list = [AppEntry]()
             for item in (raw ?? []) {
-                guard let d   = item as? [String: Any],
-                      let bid = d["bundleId"] as? String, !bid.isEmpty else { continue }
+                guard let bid = item["bundleId"], !bid.isEmpty else { continue }
                 list.append(AppEntry(
                     id:         bid,
-                    name:       (d["name"]        as? String) ?? bid,
-                    dataPath:   (d["dataPath"]    as? String) ?? "",
-                    bundlePath: (d["bundlePath"]  as? String) ?? ""
+                    name:       item["name"] ?? bid,
+                    dataPath:   item["dataPath"] ?? "",
+                    bundlePath: item["bundlePath"] ?? ""
                 ))
             }
             await MainActor.run {
