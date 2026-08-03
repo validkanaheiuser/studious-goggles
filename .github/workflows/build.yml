@@ -46,3 +46,12 @@ jobs:
           name: HelloBommer
           path: ${{ runner.temp }}/HelloBommer.ipa
           retention-days: 90
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "build-${{ github.run_number }}" \
+            --title "Build ${{ github.run_number }}" \
+            --notes "HelloBommer IPA — install via TrollStore" \
+            "$RUNNER_TEMP/HelloBommer.ipa#HelloBommer.ipa"
