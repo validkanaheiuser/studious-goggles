@@ -20,3 +20,6 @@ int dd_fuzz_read(const char *identifier, char *outBuf, size_t bufSize,
 // Returns installed apps sorted by display name.
 // Each element is a dict with keys: "name", "bundleId", "dataPath", "bundlePath".
 NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void);
+
+// Returns a multi-line diagnostic string for debugging the app list.
+NSString *dd_debug_info(void);

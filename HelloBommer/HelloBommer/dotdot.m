@@ -136,6 +136,38 @@ int dd_fuzz_read(const char *identifier, char *outBuf, size_t bufSize,
     return -1;
 }
 
+NSString *dd_debug_info(void) {
+    NSMutableString *s = [NSMutableString string];
+
+    Class WSClass = NSClassFromString(@"LSApplicationWorkspace");
+    [s appendFormat:@"LSApplicationWorkspace: %@\n", WSClass ? @"found" : @"NOT FOUND"];
+    if (!WSClass) return [s copy];
+
+    id ws = [WSClass performSelector:@selector(defaultWorkspace)];
+    [s appendFormat:@"defaultWorkspace: %@\n", ws ? @"ok" : @"nil"];
+    if (!ws) return [s copy];
+
+    NSArray *proxies = [ws performSelector:@selector(allApplications)];
+    [s appendFormat:@"allApplications count: %lu\n", (unsigned long)(proxies ? proxies.count : 0)];
+    if (!proxies || proxies.count == 0) return [s copy];
+
+    id first = proxies.firstObject;
+    [s appendFormat:@"proxy class: %@\n", NSStringFromClass([first class])];
+    [s appendFormat:@"has localizedName: %@\n",
+        [first respondsToSelector:@selector(localizedName)] ? @"yes" : @"no"];
+    [s appendFormat:@"has applicationIdentifier: %@\n",
+        [first respondsToSelector:@selector(applicationIdentifier)] ? @"yes" : @"no"];
+    [s appendFormat:@"has dataContainerURL: %@\n",
+        [first respondsToSelector:@selector(dataContainerURL)] ? @"yes" : @"no"];
+
+    if ([first respondsToSelector:@selector(applicationIdentifier)])
+        [s appendFormat:@"first id: %@\n", [first performSelector:@selector(applicationIdentifier)]];
+    if ([first respondsToSelector:@selector(localizedName)])
+        [s appendFormat:@"first name: %@\n", [first performSelector:@selector(localizedName)]];
+
+    return [s copy];
+}
+
 // Returns installed apps via LSApplicationWorkspace (private API).
 NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
     Class WSClass = NSClassFromString(@"LSApplicationWorkspace");

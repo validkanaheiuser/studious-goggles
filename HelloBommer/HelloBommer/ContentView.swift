@@ -41,6 +41,7 @@ struct ContentView: View {
     @State private var alertTitle             = ""
     @State private var alertMessage           = ""
     @State private var loading                = true
+    @State private var debugInfo              = ""
 
     private var selected: AppEntry? { apps.first { $0.id == selectedId } }
 
@@ -67,7 +68,17 @@ struct ContentView: View {
                 TextField("Search apps…", text: $searchText)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                if loading { ProgressView().scaleEffect(0.7) }
+                if loading {
+                    ProgressView().scaleEffect(0.7)
+                } else {
+                    Button {
+                        alertTitle   = "Debug Info"
+                        alertMessage = debugInfo.isEmpty ? "(no info)" : debugInfo
+                        showAlert    = true
+                    } label: {
+                        Image(systemName: "info.circle").foregroundStyle(.secondary)
+                    }
+                }
             }
             .padding(8)
             .background(Color(.systemGray6))
@@ -181,7 +192,9 @@ struct ContentView: View {
     private func loadApps() {
         loading = true
         Task.detached {
+            let diag = dd_debug_info() ?? "(dd_debug_info returned nil)"
             let raw  = dd_installed_apps()
+            let rawCount = raw?.count ?? -1
             var list = [AppEntry]()
             for item in (raw ?? []) {
                 guard let bid = item["bundleId"], !bid.isEmpty else { continue }
@@ -192,9 +205,16 @@ struct ContentView: View {
                     bundlePath: item["bundlePath"] ?? ""
                 ))
             }
+            let info = "raw count: \(rawCount)\nparsed: \(list.count)\n\n\(diag)"
             await MainActor.run {
-                apps    = list
-                loading = false
+                apps      = list
+                debugInfo = info
+                loading   = false
+                if list.isEmpty {
+                    alertTitle   = "No Apps Found"
+                    alertMessage = info
+                    showAlert    = true
+                }
             }
         }
     }
