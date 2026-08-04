@@ -15,7 +15,7 @@ final class WriteModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var model = WriteModel()
 
-    private let targetPath = "/var/mobile/Containers/Data/Application/6A65489C-F668-4C29-AFA2-4B1FE2C4C645/Documents/hellobommer_test"
+    private let targetPath = "/private/tmp/hellobommer_test"
     private let traversalPrefix = "../../../../../../../../../../.."
 
     var body: some View {

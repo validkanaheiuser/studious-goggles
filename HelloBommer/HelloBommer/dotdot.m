@@ -75,5 +75,20 @@ int dd_write(const char *identifier, const char *targetPath, dd_progress_t progr
     }
 
     step(@"5/5: timeout — file never appeared");
+
+    // scan /private/tmp/ to see if the daemon wrote anything nearby
+    NSArray *tmpContents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@"/private/tmp" error:nil];
+    if (tmpContents.count == 0) {
+        step(@"[dbg] /private/tmp/ empty or unreadable");
+    } else {
+        NSMutableArray *hb = [NSMutableArray array];
+        for (NSString *name in tmpContents) {
+            if ([name hasPrefix:@"hellobommer"] || [name hasPrefix:@"roooot"] || [name hasPrefix:@"MR"] || [name hasPrefix:@"media"])
+                [hb addObject:name];
+        }
+        step([NSString stringWithFormat:@"[dbg] /private/tmp/ (%lu items): %@",
+              (unsigned long)tmpContents.count,
+              hb.count ? [hb componentsJoinedByString:@", "] : @"nothing matching"]);
+    }
     return 1;
 }
