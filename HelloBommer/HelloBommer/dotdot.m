@@ -254,6 +254,19 @@ NSString *dd_debug_info(void) {
     NSMutableString *s = [NSMutableString string];
     NSFileManager *fm = [NSFileManager defaultManager];
 
+    // ── Summary first so it's visible at top of dialog ────────────────────────
+    {
+        NSArray *apps = dd_installed_apps();
+        NSUInteger withPath = 0;
+        for (NSDictionary *a in apps) { if ([a[@"dataPath"] length] > 0) withPath++; }
+        [s appendFormat:@"=== APPS: %lu (paths: %lu) ===\n", (unsigned long)apps.count, (unsigned long)withPath];
+        if (apps.count > 0) {
+            NSDictionary *f = apps.firstObject;
+            [s appendFormat:@"first: %@ | %@\n", f[@"name"], f[@"dataPath"]];
+        }
+        [s appendString:@"\n"];
+    }
+
     // /var/mobile readability
     NSArray *varMobile = [fm contentsOfDirectoryAtPath:@"/var/mobile" error:nil];
     [s appendFormat:@"/var/mobile: %@\n", varMobile ? [NSString stringWithFormat:@"%lu entries", (unsigned long)varMobile.count] : @"NOT READABLE"];
@@ -361,20 +374,6 @@ NSString *dd_debug_info(void) {
                   : [NSString stringWithFormat:@"err(%@)", err.localizedDescription]];
     }
 
-    // Total from dd_installed_apps
-    NSArray *apps = dd_installed_apps();
-    NSUInteger withPath = 0;
-    for (NSDictionary *a in apps) {
-        if ([a[@"dataPath"] length] > 0) withPath++;
-    }
-    [s appendFormat:@"installed_apps: %lu (with path: %lu)\n",
-        (unsigned long)apps.count, (unsigned long)withPath];
-    if (apps.count > 0) {
-        NSDictionary *first = apps.firstObject;
-        [s appendFormat:@"first: %@ | %@ | %@",
-            first[@"name"], first[@"bundleId"], first[@"dataPath"]];
-    }
-
     return [s copy];
 }
 
@@ -397,10 +396,12 @@ NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
         if (fn1) {
             CFArrayRef cf = fn1(NO);
             if (cf) {
+                CFTypeID strTypeId = CFStringGetTypeID();
                 CFIndex n = CFArrayGetCount(cf);
                 for (CFIndex i = 0; i < n; i++) {
-                    CFStringRef str = (CFStringRef)CFArrayGetValueAtIndex(cf, i);
-                    NSString *bid = (__bridge NSString *)str;
+                    CFTypeRef val = (CFTypeRef)CFArrayGetValueAtIndex(cf, i);
+                    if (!val || CFGetTypeID(val) != strTypeId) continue;
+                    NSString *bid = (__bridge NSString *)val;
                     if (bid.length) [allIds addObject:bid];
                 }
                 CFRelease(cf);
