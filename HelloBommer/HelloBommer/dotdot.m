@@ -14,7 +14,7 @@
 //  https://www.gnu.org/licenses/agpl-3.0.html
 //
 
-#import <Foundation/Foundation.h>
+#import "dotdot.h"
 #import <dlfcn.h>
 #import <sys/stat.h>
 #import <fcntl.h>
