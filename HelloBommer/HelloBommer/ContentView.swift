@@ -34,11 +34,17 @@ struct ContentView: View {
 
         Task.detached {
             let result = dd_write(identifier, destination)
+
+            // Check the file independently so UI shows uid regardless of return code
+            var st = stat()
+            let exists = withUnsafeMutablePointer(to: &st) { destination.withCString { stat($0, $1) } } == 0
+            let fileInfo = exists
+                ? "uid=\(st.st_uid) gid=\(st.st_gid) size=\(st.st_size)"
+                : "file not found"
+
             await finish(
                 title: result == 0 ? "Write OK" : "Write Failed",
-                message: result == 0
-                    ? "Created:\n\(destination)"
-                    : "dd_write returned \(result)\n\(destination)"
+                message: "\(destination)\n\(fileInfo)"
             )
         }
     }

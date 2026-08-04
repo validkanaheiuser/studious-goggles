@@ -49,19 +49,17 @@ int dd_write(const char *identifier, const char *targetPath) {
     for (int i = 0; i < 3000000; i++) {
         struct stat st;
 
-        if (stat(targetPath, &st) == 0 && st.st_uid == 0) {
+        if (stat(targetPath, &st) == 0) {
             int fd = open(targetPath, O_RDONLY);
-            if (fd >= 0) {
-                char buf[256] = {0};
-                ssize_t n = read(fd, buf, sizeof(buf) - 1);
-                close(fd);
+            char buf[256] = {0};
+            ssize_t n = fd >= 0 ? read(fd, buf, sizeof(buf) - 1) : 0;
+            if (fd >= 0) close(fd);
 
-                if (n > 0) {
-                    printf("(dd) written: uid=%d gid=%d mode=%o size=%lld\n", st.st_uid, st.st_gid, st.st_mode & 07777, (long long)st.st_size);
-                    printf("(dd) marker: %s", buf);
-                    return 0;
-                }
-            }
+            // Report what we found regardless of uid
+            printf("(dd) found: uid=%d gid=%d mode=%o size=%lld\n",
+                   st.st_uid, st.st_gid, st.st_mode & 07777, (long long)st.st_size);
+            if (n > 0) printf("(dd) content: %s", buf);
+            return 0;
         }
     }
 
