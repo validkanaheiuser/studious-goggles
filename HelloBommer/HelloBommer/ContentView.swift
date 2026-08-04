@@ -1,59 +1,75 @@
 import SwiftUI
 
+final class WriteModel: ObservableObject {
+    @Published var step = ""
+    @Published var running = false
+    @Published var showAlert = false
+    @Published var alertTitle = ""
+    @Published var alertMessage = ""
+}
+
 struct ContentView: View {
+    @StateObject private var model = WriteModel()
+
     private let targetPath = "/var/mobile/Containers/Data/Application/6A65489C-F668-4C29-AFA2-4B1FE2C4C645/Documents/hellobommer_test"
     private let traversalPrefix = "../../../../../../../../../../.."
 
-    @State private var running = false
-    @State private var showAlert = false
-    @State private var alertTitle = ""
-    @State private var alertMessage = ""
-
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             Button("Write") { runWrite() }
                 .buttonStyle(.borderedProminent)
-                .disabled(running)
+                .disabled(model.running)
 
-            if running {
+            if model.running {
+                Text(model.step)
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
                 ProgressView()
             }
         }
         .padding()
-        .alert(alertTitle, isPresented: $showAlert) {
+        .alert(model.alertTitle, isPresented: $model.showAlert) {
             Button("OK") {}
         } message: {
-            Text(alertMessage)
+            Text(model.alertMessage)
         }
     }
 
     private func runWrite() {
-        running = true
+        model.running = true
+        model.step = "starting…"
         let destination = targetPath
         let identifier = traversalPrefix + destination
+        let m = model
 
-        Task.detached {
-            let result = dd_write(identifier, destination)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = dd_write(identifier, destination) { step in
+                // already dispatched to main queue by ObjC
+                m.step = step ?? ""
+            }
 
-            // Check the file independently so UI shows uid regardless of return code
-            var st = stat()
-            let exists = withUnsafeMutablePointer(to: &st) { destination.withCString { stat($0, $1) } } == 0
-            let fileInfo = exists
-                ? "uid=\(st.st_uid) gid=\(st.st_gid) size=\(st.st_size)"
-                : "file not found"
+            var exists = false
+            var uid: UInt32 = 0
+            var fileSize: Int64 = 0
+            destination.withCString { cPath in
+                var st = stat()
+                if withUnsafeMutablePointer(to: &st, { Darwin.stat(cPath, $0) }) == 0 {
+                    exists = true
+                    uid = st.st_uid
+                    fileSize = st.st_size
+                }
+            }
 
-            await finish(
-                title: result == 0 ? "Write OK" : "Write Failed",
-                message: "\(destination)\n\(fileInfo)"
-            )
+            let fileInfo = exists ? "uid=\(uid) size=\(fileSize)" : "file not found"
+            DispatchQueue.main.async {
+                m.running = false
+                m.step = ""
+                m.alertTitle = result == 0 ? "Write OK" : "Write Failed"
+                m.alertMessage = "\(destination)\n\(fileInfo)"
+                m.showAlert = true
+            }
         }
-    }
-
-    @MainActor
-    private func finish(title: String, message: String) {
-        running = false
-        alertTitle = title
-        alertMessage = message
-        showAlert = true
     }
 }

