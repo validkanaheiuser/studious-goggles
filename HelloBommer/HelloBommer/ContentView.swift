@@ -1,11 +1,15 @@
 import SwiftUI
 
 final class WriteModel: ObservableObject {
-    @Published var step = ""
+    @Published var log = ""
     @Published var running = false
     @Published var showAlert = false
     @Published var alertTitle = ""
     @Published var alertMessage = ""
+
+    func appendLog(_ line: String) {
+        log += line + "\n"
+    }
 }
 
 struct ContentView: View {
@@ -20,12 +24,21 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(model.running)
 
+            if model.running || !model.log.isEmpty {
+                ScrollView {
+                    Text(model.log)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+                .frame(maxHeight: 260)
+                .background(Color(.systemGray6))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal)
+            }
+
             if model.running {
-                Text(model.step)
-                    .font(.caption2.monospaced())
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
                 ProgressView()
             }
         }
@@ -39,7 +52,7 @@ struct ContentView: View {
 
     private func runWrite() {
         model.running = true
-        model.step = "starting…"
+        model.log = ""
         let destination = targetPath
         let identifier = traversalPrefix + destination
         let m = model
@@ -47,7 +60,7 @@ struct ContentView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let result = dd_write(identifier, destination) { step in
                 // already dispatched to main queue by ObjC
-                m.step = step ?? ""
+                m.appendLog(step ?? "")
             }
 
             var exists = false
@@ -64,8 +77,8 @@ struct ContentView: View {
 
             let fileInfo = exists ? "uid=\(uid) size=\(fileSize)" : "file not found"
             DispatchQueue.main.async {
+                m.appendLog("→ " + fileInfo)
                 m.running = false
-                m.step = ""
                 m.alertTitle = result == 0 ? "Write OK" : "Write Failed"
                 m.alertMessage = "\(destination)\n\(fileInfo)"
                 m.showAlert = true
