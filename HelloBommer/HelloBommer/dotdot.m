@@ -47,7 +47,7 @@ int dd_write(const char *identifier, const char *targetPath) {
     mr_send_fn fn = mr_fn();
     if (!fn) return 1;
 
-    NSData *marker = [NSData dataWithBytes:"roooot_was_here\n" length:48];
+    NSData *marker = [@"roooot_was_here\n" dataUsingEncoding:NSUTF8StringEncoding];
 
     NSMutableData *proto = [NSMutableData dataWithData:tagged_field(1, marker)];
     [proto appendData:tagged_field(2, [[NSString stringWithUTF8String:identifier]
