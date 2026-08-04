@@ -142,6 +142,46 @@ NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void);
 // ── Container metadata plist key ─────────────────────────────────────────────
 #define kMCMMetaId @"MCMMetadataIdentifier"
 
+// ── Read LastLaunchServicesMap.plist → fill id/path/name maps ─────────────────
+static NSInteger _load_lsmap(NSMutableOrderedSet *allIds,
+                              NSMutableDictionary *dataMap,
+                              NSMutableDictionary *bundleMap,
+                              NSMutableDictionary *nameMap) {
+    NSArray *candidates = @[
+        @"/var/mobile/Library/MobileInstallation/LastLaunchServicesMap.plist",
+        @"/private/var/mobile/Library/MobileInstallation/LastLaunchServicesMap.plist",
+    ];
+    for (NSString *path in candidates) {
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (![plist isKindOfClass:[NSDictionary class]]) continue;
+
+        // Keys typically: "User", "System", "Internal", "Disabled"
+        NSArray *sections = @[@"User", @"System", @"Internal"];
+        for (NSString *section in sections) {
+            id sec = plist[section];
+            if (![sec isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary *apps = (NSDictionary *)sec;
+            for (NSString *bid in apps) {
+                if (!bid.length) continue;
+                [allIds addObject:bid];
+                id info = apps[bid];
+                if (![info isKindOfClass:[NSDictionary class]]) continue;
+                // "Container" = data container path
+                NSString *container = info[@"Container"];
+                // "Path" = bundle .app path
+                NSString *appPath   = info[@"Path"];
+                // some entries also have "BundleContainer"
+                NSString *bundleCtn = info[@"BundleContainer"];
+                if (container.length  && !dataMap[bid])   dataMap[bid]   = container;
+                if (appPath.length    && !bundleMap[bid]) bundleMap[bid] = appPath;
+                if (bundleCtn.length  && !bundleMap[bid]) bundleMap[bid] = bundleCtn;
+            }
+        }
+        return (NSInteger)allIds.count;
+    }
+    return -1; // plist not found
+}
+
 // ── Scan a container directory, return {bundleId -> path} ────────────────────
 static void _scan_containers(NSString *base,
                              BOOL isBundleContainer,
@@ -159,10 +199,8 @@ static void _scan_containers(NSString *base,
         if (!bid || bid.length == 0) continue;
 
         if (!isBundleContainer) {
-            // Data container: the dir itself is the container root
             if (!idToPath[bid]) idToPath[bid] = dir;
         } else {
-            // Bundle container: find the .app inside, read Info.plist for name
             NSArray *items = [fm contentsOfDirectoryAtPath:dir error:nil];
             for (NSString *item in items) {
                 if (![item hasSuffix:@".app"]) continue;
@@ -216,48 +254,111 @@ NSString *dd_debug_info(void) {
     NSMutableString *s = [NSMutableString string];
     NSFileManager *fm = [NSFileManager defaultManager];
 
-    // SBS
-    void *sbsH = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
-    CFArrayRef (*SBSCopyIds)(BOOL) = sbsH ? dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers") : NULL;
-    NSArray *sbsIds = nil;
-    if (SBSCopyIds) {
-        CFArrayRef cf = SBSCopyIds(NO);
-        if (cf) sbsIds = (__bridge_transfer NSArray *)cf;
-    }
-    [s appendFormat:@"SBS ids: %lu\n", (unsigned long)(sbsIds.count)];
+    // /var/mobile readability
+    NSArray *varMobile = [fm contentsOfDirectoryAtPath:@"/var/mobile" error:nil];
+    [s appendFormat:@"/var/mobile: %@\n", varMobile ? [NSString stringWithFormat:@"%lu entries", (unsigned long)varMobile.count] : @"NOT READABLE"];
 
-    // LAP
+    // SpringBoardServices — detailed diagnostics
+    void *sbsH = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+    [s appendFormat:@"SBS handle: %@\n", sbsH ? @"ok" : @"nil (dlopen failed)"];
+
+    if (sbsH) {
+        // Form 1: CFArrayRef (*)(BOOL) — classic
+        typedef CFArrayRef (*sbs_ids1_t)(BOOL);
+        sbs_ids1_t fn1 = (sbs_ids1_t)dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers");
+        [s appendFormat:@"SBSCopyIds fn: %@\n", fn1 ? @"ok" : @"nil (dlsym failed)"];
+        if (fn1) {
+            CFArrayRef cf = fn1(NO);
+            CFIndex cnt = cf ? CFArrayGetCount(cf) : -1;
+            [s appendFormat:@"SBSCopyIds(NO) → cf=%@ count=%ld\n", cf ? @"ok" : @"NULL", (long)cnt];
+            if (cf) CFRelease(cf);
+        }
+
+        // Form 2: void (*)(BOOL, CFArrayRef*) — alternate signature
+        typedef void (*sbs_ids2_t)(BOOL, CFArrayRef *);
+        sbs_ids2_t fn2 = (sbs_ids2_t)dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers");
+        if (fn2) {
+            CFArrayRef cf = NULL;
+            fn2(NO, &cf);
+            CFIndex cnt = cf ? CFArrayGetCount(cf) : -1;
+            [s appendFormat:@"SBSCopyIds2(NO,&cf) → cf=%@ count=%ld\n", cf ? @"ok" : @"NULL", (long)cnt];
+            if (cf) CFRelease(cf);
+        }
+
+        // SBSCopyLocalizedApplicationNames → CFDictionary bundleId->displayName
+        typedef CFDictionaryRef (*sbs_names_t)(void);
+        sbs_names_t fnNames = (sbs_names_t)dlsym(sbsH, "SBSCopyLocalizedApplicationNames");
+        [s appendFormat:@"SBSCopyLocalizedApplicationNames fn: %@\n", fnNames ? @"ok" : @"nil"];
+        if (fnNames) {
+            CFDictionaryRef dict = fnNames();
+            CFIndex cnt = dict ? CFDictionaryGetCount(dict) : -1;
+            [s appendFormat:@"SBSNames count: %ld\n", (long)cnt];
+            if (dict) CFRelease(dict);
+        }
+    }
+
+    // LAP check + real lookup of a known system bundle
     Class LAP = NSClassFromString(@"LSApplicationProxy");
     SEL proxyForId = NSSelectorFromString(@"applicationProxyForIdentifier:");
     BOOL canProxy = LAP && [LAP respondsToSelector:proxyForId];
     [s appendFormat:@"LAP: %@\n", canProxy ? @"ok" : @"no"];
-    if (canProxy && sbsIds.count > 0) {
-        id proxy = [LAP performSelector:proxyForId withObject:sbsIds.firstObject];
-        NSURL *du = proxy ? ([proxy respondsToSelector:@selector(dataContainerURL)]
-                             ? [proxy performSelector:@selector(dataContainerURL)] : nil) : nil;
-        [s appendFormat:@"LAP dataContainerURL: %@\n", du.path ?: @"nil"];
+    if (canProxy) {
+        // Test with a known system bundle
+        for (NSString *testId in @[@"com.apple.mobilesafari", @"com.apple.springboard"]) {
+            id proxy = [LAP performSelector:proxyForId withObject:testId];
+            if (!proxy) { [s appendFormat:@"LAP[%@]: nil\n", testId]; continue; }
+            NSURL *du = [proxy respondsToSelector:@selector(dataContainerURL)]
+                        ? [proxy performSelector:@selector(dataContainerURL)] : nil;
+            [s appendFormat:@"LAP[%@]: %@\n", testId, du.path ?: @"no dataContainerURL"];
+        }
     }
 
-    // Data container scan
+    // LastLaunchServicesMap.plist
+    NSArray *lsmapPaths = @[
+        @"/var/mobile/Library/MobileInstallation/LastLaunchServicesMap.plist",
+        @"/private/var/mobile/Library/MobileInstallation/LastLaunchServicesMap.plist",
+    ];
+    for (NSString *path in lsmapPaths) {
+        NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:path];
+        if (!plist) { [s appendFormat:@"LSMap %@: not readable\n", [path lastPathComponent]]; continue; }
+        NSUInteger total = 0;
+        for (NSString *section in @[@"User", @"System", @"Internal"]) {
+            id sec = plist[section];
+            if ([sec isKindOfClass:[NSDictionary class]])
+                total += ((NSDictionary *)sec).count;
+        }
+        [s appendFormat:@"LSMap: %lu apps (keys: %@)\n", (unsigned long)total,
+            [[plist allKeys] componentsJoinedByString:@","]];
+        break;
+    }
+
+    // Container directory scan attempts — multiple paths
     NSArray *dataBases = @[
         @"/var/mobile/Containers/Data/Application",
-        @"/private/var/mobile/Containers/Data/Application"
+        @"/private/var/mobile/Containers/Data/Application",
+        @"/var/mobile/Containers/Data",
     ];
     for (NSString *base in dataBases) {
-        NSArray *uuids = [fm contentsOfDirectoryAtPath:base error:nil];
-        [s appendFormat:@"Data scan %@: %lu\n", base, (unsigned long)(uuids.count)];
-        if (uuids.count > 0) break;
+        NSError *err = nil;
+        NSArray *uuids = [fm contentsOfDirectoryAtPath:base error:&err];
+        [s appendFormat:@"Data[%@]: %@\n",
+            [base lastPathComponent],
+            uuids ? [NSString stringWithFormat:@"%lu", (unsigned long)uuids.count]
+                  : [NSString stringWithFormat:@"err(%@)", err.localizedDescription]];
     }
 
-    // Bundle container scan
     NSArray *bundleBases = @[
         @"/var/containers/Bundle/Application",
-        @"/private/var/containers/Bundle/Application"
+        @"/private/var/containers/Bundle/Application",
+        @"/var/Containers/Bundle/Application",
     ];
     for (NSString *base in bundleBases) {
-        NSArray *uuids = [fm contentsOfDirectoryAtPath:base error:nil];
-        [s appendFormat:@"Bundle scan %@: %lu\n", base, (unsigned long)(uuids.count)];
-        if (uuids.count > 0) break;
+        NSError *err = nil;
+        NSArray *uuids = [fm contentsOfDirectoryAtPath:base error:&err];
+        [s appendFormat:@"Bundle[%@]: %@\n",
+            [base lastPathComponent],
+            uuids ? [NSString stringWithFormat:@"%lu", (unsigned long)uuids.count]
+                  : [NSString stringWithFormat:@"err(%@)", err.localizedDescription]];
     }
 
     // Total from dd_installed_apps
@@ -266,7 +367,7 @@ NSString *dd_debug_info(void) {
     for (NSDictionary *a in apps) {
         if ([a[@"dataPath"] length] > 0) withPath++;
     }
-    [s appendFormat:@"installed_apps total: %lu (with path: %lu)\n",
+    [s appendFormat:@"installed_apps: %lu (with path: %lu)\n",
         (unsigned long)apps.count, (unsigned long)withPath];
     if (apps.count > 0) {
         NSDictionary *first = apps.firstObject;
@@ -280,27 +381,75 @@ NSString *dd_debug_info(void) {
 // ── Installed apps ────────────────────────────────────────────────────────────
 NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
     NSMutableOrderedSet *allIds  = [NSMutableOrderedSet orderedSet];
-    NSMutableDictionary *dataMap   = [NSMutableDictionary dictionary]; // bid -> dataPath
-    NSMutableDictionary *bundleMap = [NSMutableDictionary dictionary]; // bid -> bundlePath
-    NSMutableDictionary *nameMap   = [NSMutableDictionary dictionary]; // bid -> name
+    NSMutableDictionary *dataMap   = [NSMutableDictionary dictionary];
+    NSMutableDictionary *bundleMap = [NSMutableDictionary dictionary];
+    NSMutableDictionary *nameMap   = [NSMutableDictionary dictionary];
 
-    // ── Source 1: SBS bundle IDs ──────────────────────────────────────────────
+    // ── Source 0: LastLaunchServicesMap.plist (has IDs + paths in one shot) ───
+    _load_lsmap(allIds, dataMap, bundleMap, nameMap);
+
+    // ── Source 1: SBSCopyApplicationDisplayIdentifiers ────────────────────────
     void *sbsH = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
-    CFArrayRef (*SBSCopyIds)(BOOL) = sbsH
-        ? dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers") : NULL;
-    if (SBSCopyIds) {
-        CFArrayRef cf = SBSCopyIds(NO);
-        if (cf) {
-            NSArray *ids = (__bridge_transfer NSArray *)cf;
-            for (NSString *bid in ids)
-                if (bid.length) [allIds addObject:bid];
+    if (sbsH) {
+        // Form 1: CFArrayRef return
+        typedef CFArrayRef (*sbs_ids1_t)(BOOL);
+        sbs_ids1_t fn1 = (sbs_ids1_t)dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers");
+        if (fn1) {
+            CFArrayRef cf = fn1(NO);
+            if (cf) {
+                CFIndex n = CFArrayGetCount(cf);
+                for (CFIndex i = 0; i < n; i++) {
+                    CFStringRef str = (CFStringRef)CFArrayGetValueAtIndex(cf, i);
+                    NSString *bid = (__bridge NSString *)str;
+                    if (bid.length) [allIds addObject:bid];
+                }
+                CFRelease(cf);
+            }
+        }
+
+        // Form 2: void (*)(BOOL, CFArrayRef*) — if form 1 returned nothing
+        if (fn1 == NULL) {
+            typedef void (*sbs_ids2_t)(BOOL, CFArrayRef *);
+            sbs_ids2_t fn2 = (sbs_ids2_t)dlsym(sbsH, "SBSCopyApplicationDisplayIdentifiers");
+            if (fn2) {
+                CFArrayRef cf = NULL;
+                fn2(NO, &cf);
+                if (cf) {
+                    CFIndex n = CFArrayGetCount(cf);
+                    for (CFIndex i = 0; i < n; i++) {
+                        CFStringRef str = (CFStringRef)CFArrayGetValueAtIndex(cf, i);
+                        NSString *bid = (__bridge NSString *)str;
+                        if (bid.length) [allIds addObject:bid];
+                    }
+                    CFRelease(cf);
+                }
+            }
+        }
+
+        // SBSCopyLocalizedApplicationNames → dict { bundleId -> displayName }
+        typedef CFDictionaryRef (*sbs_names_t)(void);
+        sbs_names_t fnNames = (sbs_names_t)dlsym(sbsH, "SBSCopyLocalizedApplicationNames");
+        if (fnNames) {
+            CFDictionaryRef dict = fnNames();
+            if (dict) {
+                NSDictionary *nsDict = (__bridge NSDictionary *)dict;
+                for (NSString *bid in nsDict) {
+                    if (bid.length) {
+                        [allIds addObject:bid];
+                        NSString *name = nsDict[bid];
+                        if ([name isKindOfClass:[NSString class]] && name.length && !nameMap[bid])
+                            nameMap[bid] = name;
+                    }
+                }
+                CFRelease(dict);
+            }
         }
     }
 
     // ── Source 2: Data container filesystem scan ──────────────────────────────
     NSArray *dataBases = @[
         @"/var/mobile/Containers/Data/Application",
-        @"/private/var/mobile/Containers/Data/Application"
+        @"/private/var/mobile/Containers/Data/Application",
     ];
     for (NSString *base in dataBases) {
         _scan_containers(base, NO, dataMap, nameMap);
@@ -313,7 +462,8 @@ NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
     // ── Source 3: Bundle container filesystem scan ────────────────────────────
     NSArray *bundleBases = @[
         @"/var/containers/Bundle/Application",
-        @"/private/var/containers/Bundle/Application"
+        @"/private/var/containers/Bundle/Application",
+        @"/var/Containers/Bundle/Application",
     ];
     for (NSString *base in bundleBases) {
         _scan_containers(base, YES, bundleMap, nameMap);
@@ -323,7 +473,7 @@ NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
         }
     }
 
-    // ── Source 4: LSApplicationProxy enrichment ───────────────────────────────
+    // ── Source 4: LSApplicationProxy enrichment (fills missing paths/names) ───
     _enrich_from_lap(allIds.array, dataMap, bundleMap, nameMap);
 
     // ── Source 5: LSApplicationWorkspace selectors (last resort) ─────────────
