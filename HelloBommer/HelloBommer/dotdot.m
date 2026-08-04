@@ -136,6 +136,9 @@ int dd_fuzz_read(const char *identifier, char *outBuf, size_t bufSize,
     return -1;
 }
 
+// ── Forward declarations ──────────────────────────────────────────────────────
+NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void);
+
 // ── Container metadata plist key ─────────────────────────────────────────────
 #define kMCMMetaId @"MCMMetadataIdentifier"
 
