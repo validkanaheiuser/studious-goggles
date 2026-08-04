@@ -54,11 +54,11 @@ struct ContentView: View {
             var uid: UInt32 = 0
             var fileSize: Int64 = 0
             destination.withCString { cPath in
-                var st = stat()
-                if withUnsafeMutablePointer(to: &st, { Darwin.stat(cPath, $0) }) == 0 {
+                var buf = Darwin.stat()
+                if lstat(cPath, &buf) == 0 {
                     exists = true
-                    uid = st.st_uid
-                    fileSize = st.st_size
+                    uid = buf.st_uid
+                    fileSize = buf.st_size
                 }
             }
 
