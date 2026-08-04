@@ -284,6 +284,11 @@ NSString *dd_debug_info(void) {
             CFArrayRef cf = fn1(NO);
             CFIndex cnt = cf ? CFArrayGetCount(cf) : -1;
             [s appendFormat:@"SBSCopyIds(NO) → cf=%@ count=%ld\n", cf ? @"ok" : @"NULL", (long)cnt];
+            if (cf && cnt > 0) {
+                id el = (__bridge id)CFArrayGetValueAtIndex(cf, 0);
+                [s appendFormat:@"SBS[0] class=%@ val=%.60@\n",
+                    NSStringFromClass([el class]), [el description]];
+            }
             if (cf) CFRelease(cf);
         }
 
@@ -396,13 +401,26 @@ NSArray<NSDictionary<NSString *, NSString *> *> *dd_installed_apps(void) {
         if (fn1) {
             CFArrayRef cf = fn1(NO);
             if (cf) {
-                CFTypeID strTypeId = CFStringGetTypeID();
                 CFIndex n = CFArrayGetCount(cf);
                 for (CFIndex i = 0; i < n; i++) {
-                    CFTypeRef val = (CFTypeRef)CFArrayGetValueAtIndex(cf, i);
-                    if (!val || CFGetTypeID(val) != strTypeId) continue;
-                    NSString *bid = (__bridge NSString *)val;
-                    if (bid.length) [allIds addObject:bid];
+                    id obj = (__bridge id)CFArrayGetValueAtIndex(cf, i);
+                    if (!obj) continue;
+                    NSString *bid = nil;
+                    if ([obj isKindOfClass:[NSString class]]) {
+                        bid = (NSString *)obj;
+                    } else if ([obj isKindOfClass:[NSDictionary class]]) {
+                        NSDictionary *d = (NSDictionary *)obj;
+                        bid = d[@"bundleIdentifier"] ?: d[@"bundleId"] ?: d[@"CFBundleIdentifier"];
+                    } else {
+                        if ([obj respondsToSelector:@selector(bundleIdentifier)])
+                            bid = [obj performSelector:@selector(bundleIdentifier)];
+                        if (!bid.length && [obj respondsToSelector:NSSelectorFromString(@"applicationIdentifier")])
+                            bid = [obj performSelector:NSSelectorFromString(@"applicationIdentifier")];
+                        if (!bid.length)
+                            bid = [obj description];
+                    }
+                    if ([bid isKindOfClass:[NSString class]] && bid.length)
+                        [allIds addObject:bid];
                 }
                 CFRelease(cf);
             }
